@@ -17,24 +17,52 @@
 // text_simple = { any - ( "{" | "}" | "=" ) } ;
 // TODO...
 // ```
-extern crate nom;
-
+use failure::Fail;
 use nom::{
     branch::alt,
-    bytes::complete::{escaped, take_till, take_while, take_while1},
-    character::complete::{char, line_ending, one_of, space0, space1},
-    combinator::{cut, map, opt},
+    bytes::complete::{escaped, take, take_till, take_while1},
+    character::complete::{alphanumeric1, char, line_ending, one_of, space0, space1},
+    combinator::{all_consuming, cut, map, not, opt, peek},
+    error::{ParseError, VerboseError},
     multi::{fold_many0, many0},
     sequence::{preceded, separated_pair, terminated},
-    IResult,
+    Err, IResult,
 };
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    convert::From,
+    fmt::{self, Display, Formatter},
+};
+
+#[derive(Debug, PartialEq)]
+pub struct Error(String);
+
+impl From<(&str, nom::error::VerboseError<&str>)> for Error {
+    fn from(from: (&str, nom::error::VerboseError<&str>)) -> Self {
+        let (input, error) = from;
+        Error(nom::error::convert_error(input, error))
+    }
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "Parse error: {}", self.0)
+    }
+}
+
+impl Fail for Error {}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value<'a> {
     Text(&'a str),
-    List(Vec<&'a str>),
+    List(Vec<Value<'a>>),
     Object(Properties<'a>),
+}
+
+impl<'a> From<&'a str> for Value<'a> {
+    fn from(from: &'a str) -> Self {
+        Value::Text(from)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -77,65 +105,71 @@ impl<'a> PropertiesBuilder<'a> {
 }
 
 // consume line comments (excluding the line ending)
-fn line_comment(input: &str) -> IResult<&str, &str> {
+fn line_comment<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, &str, E> {
     preceded(char('#'), take_till(|c| c == '\r' || c == '\n'))(input)
 }
 
 // consume spaces, line endings and comments
-fn space_line_comment(input: &str) -> IResult<&str, Vec<&str>> {
+fn space_line_comment<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Vec<&str>, E> {
     many0(alt((space1, line_ending, line_comment)))(input)
 }
 
 // like line_ending, but also eats trailing spaces and comments
-fn space_comment_line_ending(input: &str) -> IResult<&str, Option<&str>> {
-    preceded(many0(space1), opt(line_ending))(input)
+fn trailing_line_ending<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, &str, E> {
+    preceded(many0(space1), preceded(opt(line_comment), line_ending))(input)
 }
 
-fn key(input: &str) -> IResult<&str, &str> {
-    take_while(|item: char| item.is_ascii_alphanumeric() || item == '_')(input)
+fn save_header<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, &str, E> {
+    terminated(alphanumeric1, line_ending)(input)
 }
 
 fn is_text_special(c: char) -> bool {
     c.is_whitespace() || "{}=\"".contains(c)
 }
 
-fn text_simple(input: &str) -> IResult<&str, &str> {
+fn text_simple<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, &str, E> {
     take_while1(|c| !is_text_special(c))(input)
 }
 
-fn text_quoted_normal(input: &str) -> IResult<&str, &str> {
+fn text_quoted_normal<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, &str, E> {
     take_while1(|c| c != '\\' && c != '"')(input)
 }
 
-fn text_quoted_inner(input: &str) -> IResult<&str, &str> {
+fn text_quoted_inner<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, &str, E> {
     escaped(text_quoted_normal, '\\', one_of("\"nr\\"))(input)
 }
 
-fn text_quoted(input: &str) -> IResult<&str, &str> {
-    preceded(char('\"'), cut(terminated(text_quoted_inner, char('\"'))))(input)
+fn text_quoted<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, &str, E> {
+    preceded(
+        char('\"'),
+        cut(terminated(
+            map(opt(text_quoted_inner), |o| o.unwrap_or("")),
+            char('\"'),
+        )),
+    )(input)
 }
 
-fn text(input: &str) -> IResult<&str, &str> {
+fn text<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, &str, E> {
     preceded(space0, alt((text_quoted, text_simple)))(input)
 }
 
-fn lbrace(input: &str) -> IResult<&str, char> {
+fn lbrace<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, char, E> {
     preceded(space_line_comment, char('{'))(input)
 }
 
-fn rbrace(input: &str) -> IResult<&str, char> {
+fn rbrace<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, char, E> {
     preceded(space_line_comment, char('}'))(input)
 }
 
-fn list_item(input: &str) -> IResult<&str, &str> {
-    preceded(space_line_comment, text)(input)
+fn list_item<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Value<'a>, E> {
+    preceded(space_line_comment, property_rvalue)(input)
 }
 
-fn list(input: &str) -> IResult<&str, Vec<&str>> {
+fn list<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Vec<Value<'a>>, E> {
     preceded(lbrace, terminated(many0(list_item), rbrace))(input)
 }
 
-fn property_rvalue<'a>(input: &'a str) -> IResult<&str, Value<'a>> {
+fn property_rvalue<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Value<'a>, E> {
     alt((
         map(text, Value::Text),
         map(list, Value::List),
@@ -143,24 +177,41 @@ fn property_rvalue<'a>(input: &'a str) -> IResult<&str, Value<'a>> {
     ))(input)
 }
 
-fn property<'a>(input: &'a str) -> IResult<&str, (&str, Value<'a>)> {
+// sometimes saves have empty braces with no associated key
+fn empty_property<'a, E: ParseError<&'a str>>(
+    input: &'a str,
+) -> IResult<&str, (&str, Value<'a>), E> {
+    map(preceded(lbrace, rbrace), |_| ("", "".into()))(input)
+}
+
+fn property<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, (&str, Value<'a>), E> {
     separated_pair(
-        key,
-        preceded(space0, char('=')),
+        text,
+        preceded(space0, opt(char('='))), // save files sometimes don't have the equal
         preceded(space0, property_rvalue),
     )(input)
 }
 
-fn properties<'a>(input: &'a str) -> IResult<&str, Properties<'a>> {
+fn properties<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Properties<'a>, E> {
     map(
         fold_many0(
             preceded(
                 space_line_comment,
-                terminated(property, space_comment_line_ending),
+                terminated(
+                    alt((property, empty_property)),
+                    // properties separated by spaces instead of lines occur in saves
+                    alt((
+                        trailing_line_ending,
+                        space1,
+                        map(not(peek(take(1usize))), |_| ""), // EOF
+                    )),
+                ),
             ),
             PropertiesBuilder::new(),
             |mut pb, (k, v)| {
-                pb.insert(k, v);
+                if k != "" {
+                    pb.insert(k, v);
+                }
                 pb
             },
         ),
@@ -168,12 +219,25 @@ fn properties<'a>(input: &'a str) -> IResult<&str, Properties<'a>> {
     )(input)
 }
 
-fn object<'a>(input: &'a str) -> IResult<&str, Properties<'a>> {
-    preceded(lbrace, terminated(properties, rbrace))(input)
+fn object<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Properties<'a>, E> {
+    preceded(lbrace, terminated(properties, cut(rbrace)))(input)
 }
 
-pub fn parse<'a>(input: &'a str) -> IResult<&str, Properties<'a>> {
-    terminated(properties, space_line_comment)(input)
+fn root<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Properties<'a>, E> {
+    all_consuming(preceded(
+        opt(save_header),
+        terminated(properties, space_line_comment),
+    ))(&input)
+}
+
+pub fn parse(input: &str) -> Result<Properties, Error> {
+    match root::<VerboseError<&str>>(input) {
+        Err(Err::Error(e)) | Err(Err::Failure(e)) => Err(Error::from((input, e))),
+        Ok(("", p)) => Ok(p),
+
+        Err(_) => unreachable!("incomplete"),
+        Ok((_, _)) => unreachable!("input remaining"),
+    }
 }
 
 #[cfg(test)]
@@ -181,49 +245,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_key() {
-        assert_eq!(key("a_key"), Ok(("", "a_key")));
-        assert_eq!(key("key_1 key_2"), Ok((" key_2", "key_1")));
-    }
-
-    #[test]
     fn test_text_simple() {
-        assert_eq!(text_simple("123"), Ok(("", "123")));
-        assert_eq!(text_simple("123 456"), Ok((" 456", "123")));
-        assert_eq!(text_simple("a.val ue"), Ok((" ue", "a.val")));
+        assert_eq!(text_simple::<()>("123"), Ok(("", "123")));
+        assert_eq!(text_simple::<()>("123 456"), Ok((" 456", "123")));
+        assert_eq!(text_simple::<()>("a.val ue"), Ok((" ue", "a.val")));
     }
 
     #[test]
     fn test_text_quoted() {
-        assert_eq!(opt(text_quoted)("a text"), Ok(("a text", None)));
-        assert_eq!(text_quoted("\"a text\""), Ok(("", "a text")));
+        assert_eq!(opt(text_quoted::<()>)("a text"), Ok(("a text", None)));
+        assert_eq!(text_quoted::<()>("\"a text\""), Ok(("", "a text")));
         assert_eq!(
-            text_quoted("\"a \\\"text\\\"\""),
+            text_quoted::<()>("\"a \\\"text\\\"\""),
             Ok(("", "a \\\"text\\\""))
         );
     }
 
     #[test]
     fn test_lbrace() {
-        assert_eq!(lbrace("{"), Ok(("", '{')));
-        assert_eq!(lbrace("{ after"), Ok((" after", '{')));
-        assert_eq!(lbrace("  \t {"), Ok(("", '{')));
+        assert_eq!(lbrace::<()>("{"), Ok(("", '{')));
+        assert_eq!(lbrace::<()>("{ after"), Ok((" after", '{')));
+        assert_eq!(lbrace::<()>("  \t {"), Ok(("", '{')));
     }
 
     #[test]
     fn test_list_item() {
-        assert_eq!(list_item("  \n \r\n\t  \titem"), Ok(("", "item")));
+        assert_eq!(
+            list_item::<()>("  \n \r\n\t  \titem"),
+            Ok(("", "item".into()))
+        );
     }
 
     #[test]
     fn test_list() {
         assert_eq!(
-            list("{ item1 item2 item3 }"),
-            Ok(("", vec!["item1", "item2", "item3",]))
+            list::<()>("{ item1 item2 item3 }"),
+            Ok(("", vec!["item1".into(), "item2".into(), "item3".into(),]))
         );
         assert_eq!(
-            list("{\nitem1\r\nitem2 \n\n\titem3\r\n \t}"),
-            Ok(("", vec!["item1", "item2", "item3",]))
+            list::<()>("{\nitem1\r\nitem2 \n\n\titem3\r\n \t}"),
+            Ok(("", vec!["item1".into(), "item2".into(), "item3".into(),]))
         );
     }
 
@@ -236,7 +297,7 @@ key3 = val3
 "#;
 
         assert_eq!(
-            properties(list),
+            properties::<()>(list),
             Ok((
                 "",
                 Properties::Map(
@@ -270,7 +331,10 @@ root_key = {
                 Value::Object(Properties::Map(
                     [
                         ("prop1_key", Value::Text("val1")),
-                        ("prop2_key", Value::List(vec!["val2a", "val2b", "val2c"])),
+                        (
+                            "prop2_key",
+                            Value::List(vec!["val2a".into(), "val2b".into(), "val2c".into()]),
+                        ),
                         (
                             "prop3_key",
                             Value::Object(Properties::Map(
@@ -291,6 +355,6 @@ root_key = {
             .collect(),
         );
 
-        assert_eq!(parse(txt), Ok(("", obj)))
+        assert_eq!(parse(txt), Ok(obj))
     }
 }
