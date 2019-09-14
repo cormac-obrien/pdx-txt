@@ -55,6 +55,7 @@ impl Fail for Error {}
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value<'a> {
     Text(&'a str),
+    FlatList(Vec<Value<'a>>), // for multiple identical keys in a property list
     List(Vec<Value<'a>>),
     Object(Properties<'a>),
 }
@@ -66,41 +67,35 @@ impl<'a> From<&'a str> for Value<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Properties<'a> {
-    Map(HashMap<&'a str, Value<'a>>),
-    List(Vec<(&'a str, Value<'a>)>),
+pub struct Properties<'a> {
+    map: HashMap<&'a str, Value<'a>>,
 }
 
 #[derive(Clone, Debug)]
 struct PropertiesBuilder<'a> {
-    has_duplicates: bool,
     map: HashMap<&'a str, Value<'a>>,
-    list: Vec<(&'a str, Value<'a>)>,
 }
 
 impl<'a> PropertiesBuilder<'a> {
     fn new() -> PropertiesBuilder<'a> {
         PropertiesBuilder {
-            has_duplicates: false,
             map: HashMap::new(),
-            list: Vec::new(),
         }
     }
 
     fn insert(&mut self, k: &'a str, v: Value<'a>) {
-        if !self.has_duplicates && self.map.insert(k, v.clone()).is_some() {
-            self.has_duplicates = true;
+        if let Some(Value::FlatList(ref mut l)) = self.map.get_mut(k) {
+            l.push(v);
+        } else if self.map.get(k).is_some() {
+            let old_val = self.map.remove(k).unwrap();
+            self.map.insert(k, Value::FlatList(vec![old_val, v]));
+        } else {
+            self.map.insert(k, v);
         }
-
-        self.list.push((k, v));
     }
 
     fn build(self) -> Properties<'a> {
-        if self.has_duplicates {
-            Properties::List(self.list)
-        } else {
-            Properties::Map(self.map)
-        }
+        Properties { map: self.map }
     }
 }
 
