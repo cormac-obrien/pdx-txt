@@ -252,6 +252,10 @@ fn integer<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, i32, E> 
     )(input)
 }
 
+fn floating<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, f32, E> {
+    terminated(float, not(char('.')))(input)
+}
+
 fn is_text_special(c: char) -> bool {
     c.is_whitespace() || "{}=\"".contains(c)
 }
@@ -301,7 +305,7 @@ fn list<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Vec<Value<'
 fn property_rvalue<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Value<'a>, E> {
     alt((
         map(integer, Value::Int),
-        map(float, Value::Float),
+        map(floating, Value::Float),
         map(text, Value::Text),
         map(list, Value::List),
         map(object, Value::Object),
@@ -380,6 +384,11 @@ mod tests {
         assert_eq!(integer::<()>("123"), Ok(("", 123)));
         assert_eq!(integer::<()>("-456"), Ok(("", -456)));
         assert_eq!(opt(integer::<()>)("175.012"), Ok(("175.012", None)));
+    }
+
+    #[test]
+    fn test_floating() {
+        assert_eq!(opt(floating::<()>)("1970.1.1"), Ok(("1970.1.1", None)));
     }
 
     #[test]
