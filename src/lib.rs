@@ -21,23 +21,26 @@ use failure::Fail;
 use nom::{
     branch::alt,
     bytes::complete::{escaped, take, take_till, take_while1},
-    character::complete::{alphanumeric1, char, line_ending, one_of, space0, space1},
-    combinator::{all_consuming, cut, map, not, opt, peek},
+    character::complete::{alphanumeric1, char, digit1, line_ending, one_of, space0, space1},
+    combinator::{all_consuming, cut, map, map_res, not, opt, peek, recognize},
     error::{ParseError, VerboseError},
     multi::{fold_many0, many0},
-    sequence::{preceded, separated_pair, terminated},
+    number::complete::float,
+    sequence::{pair, preceded, separated_pair, terminated},
     Err, IResult,
 };
 use std::{
     collections::HashMap,
     convert::From,
     fmt::{self, Display, Formatter},
+    str::FromStr,
 };
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
-    Parse(String),
     NoSuchProperty(String),
+    Parse(String),
+    Type { value: OwnedValue, target: String },
 }
 
 impl From<(&str, nom::error::VerboseError<&str>)> for Error {
@@ -50,8 +53,11 @@ impl From<(&str, nom::error::VerboseError<&str>)> for Error {
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            Error::Parse(ref s) => write!(f, "Parse error: {}", s),
             Error::NoSuchProperty(ref s) => write!(f, "No such property: {}", s),
+            Error::Parse(ref s) => write!(f, "Parse error: {}", s),
+            Error::Type { value, target } => {
+                write!(f, "Type error: converting {:?} to {}", value, target)
+            }
         }
     }
 }
@@ -60,10 +66,89 @@ impl Fail for Error {}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value<'a> {
+    Int(i32),
+    Float(f32),
     Text(&'a str),
     FlatList(Vec<Value<'a>>), // for multiple identical keys in a property list
     List(Vec<Value<'a>>),
     Object(Properties<'a>),
+}
+
+impl<'a> Value<'a> {
+    fn to_owned_value(&self) -> OwnedValue {
+        match self {
+            Value::Int(i) => OwnedValue::Int(*i),
+            Value::Float(f) => OwnedValue::Float(*f),
+            Value::Text(ref s) => OwnedValue::Text(s.to_string()),
+            Value::FlatList(ref fl) => {
+                OwnedValue::FlatList(fl.iter().map(|v| v.to_owned_value()).collect())
+            }
+            Value::List(ref l) => OwnedValue::List(l.iter().map(|v| v.to_owned_value()).collect()),
+            Value::Object(ref p) => OwnedValue::Object(p.to_owned_properties()),
+        }
+    }
+
+    pub fn try_as_int(&self) -> Result<i32, Error> {
+        match self {
+            Value::Int(i) => Ok(*i),
+            x => Err(Error::Type {
+                value: x.to_owned_value(),
+                target: "i32".to_string(),
+            }),
+        }
+    }
+
+    pub fn try_as_float(&self) -> Result<f32, Error> {
+        match self {
+            Value::Float(f) => Ok(*f),
+            x => Err(Error::Type {
+                value: x.to_owned_value(),
+                target: "f32".to_string(),
+            }),
+        }
+    }
+
+    pub fn try_as_str(&self) -> Result<&'a str, Error> {
+        match self {
+            Value::Text(s) => Ok(s),
+            x => Err(Error::Type {
+                value: x.to_owned_value(),
+                target: "&str".to_string(),
+            }),
+        }
+    }
+
+    pub fn try_as_list(&self) -> Result<&[Value<'a>], Error> {
+        match self {
+            Value::List(v) | Value::FlatList(v) => Ok(v.as_slice()),
+            x => Err(Error::Type {
+                value: x.to_owned_value(),
+                target: "&str".to_string(),
+            }),
+        }
+    }
+
+    pub fn try_as_object(&self) -> Result<&Properties<'a>, Error> {
+        match self {
+            Value::Object(ref o) => Ok(o),
+            x => Err(Error::Type {
+                value: x.to_owned_value(),
+                target: "&str".to_string(),
+            }),
+        }
+    }
+}
+
+impl<'a> From<i32> for Value<'a> {
+    fn from(value: i32) -> Self {
+        Value::Int(value)
+    }
+}
+
+impl<'a> From<f32> for Value<'a> {
+    fn from(value: f32) -> Self {
+        Value::Float(value)
+    }
 }
 
 impl<'a> From<&'a str> for Value<'a> {
@@ -85,6 +170,16 @@ impl<'a> Properties<'a> {
         self.map
             .get(key.as_ref())
             .ok_or(Error::NoSuchProperty(key.as_ref().to_string()))
+    }
+
+    fn to_owned_properties(&self) -> OwnedProperties {
+        OwnedProperties {
+            map: self
+                .map
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_owned_value()))
+                .collect(),
+        }
     }
 }
 
@@ -116,6 +211,21 @@ impl<'a> PropertiesBuilder<'a> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum OwnedValue {
+    Int(i32),
+    Float(f32),
+    Text(String),
+    FlatList(Vec<OwnedValue>),
+    List(Vec<OwnedValue>),
+    Object(OwnedProperties),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OwnedProperties {
+    map: HashMap<String, OwnedValue>,
+}
+
 // consume line comments (excluding the line ending)
 fn line_comment<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, &str, E> {
     preceded(char('#'), take_till(|c| c == '\r' || c == '\n'))(input)
@@ -133,6 +243,13 @@ fn trailing_line_ending<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&
 
 fn save_header<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, &str, E> {
     terminated(alphanumeric1, line_ending)(input)
+}
+
+fn integer<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, i32, E> {
+    map_res(
+        recognize(terminated(pair(opt(char('-')), digit1), not(char('.')))),
+        FromStr::from_str,
+    )(input)
 }
 
 fn is_text_special(c: char) -> bool {
@@ -183,6 +300,8 @@ fn list<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Vec<Value<'
 
 fn property_rvalue<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Value<'a>, E> {
     alt((
+        map(integer, Value::Int),
+        map(float, Value::Float),
         map(text, Value::Text),
         map(list, Value::List),
         map(object, Value::Object),
@@ -257,9 +376,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_integer() {
+        assert_eq!(integer::<()>("123"), Ok(("", 123)));
+        assert_eq!(integer::<()>("-456"), Ok(("", -456)));
+        assert_eq!(opt(integer::<()>)("175.012"), Ok(("175.012", None)));
+    }
+
+    #[test]
     fn test_text_simple() {
-        assert_eq!(text_simple::<()>("123"), Ok(("", "123")));
-        assert_eq!(text_simple::<()>("123 456"), Ok((" 456", "123")));
         assert_eq!(text_simple::<()>("a.val ue"), Ok((" ue", "a.val")));
     }
 
@@ -331,7 +455,7 @@ key3 = val3
         let txt = r#" #comment
 root_key = {
     prop1_key = val1
-    prop2_key = { val2a val2b val2c }
+    prop2_key = { 0.000 2.722 1.870 }
     prop3_key = { # prop3 comment
         prop3_1_key = val3_1
     }
@@ -345,7 +469,7 @@ root_key = {
                         ("prop1_key", Value::Text("val1")),
                         (
                             "prop2_key",
-                            Value::List(vec!["val2a".into(), "val2b".into(), "val2c".into()]),
+                            Value::List(vec![0.000.into(), 2.722.into(), 1.870.into()]),
                         ),
                         (
                             "prop3_key",
