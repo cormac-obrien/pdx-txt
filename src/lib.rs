@@ -253,7 +253,9 @@ fn integer<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, i32, E> 
 }
 
 fn floating<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, f32, E> {
-    terminated(float, not(char('.')))(input)
+    // check first char is a digit
+    // this avoids weird parse issues with words that start with the letter e
+    preceded(peek(digit1), terminated(float, peek(not(char('.')))))(input)
 }
 
 fn is_text_special(c: char) -> bool {
@@ -345,6 +347,7 @@ fn properties<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Prope
             PropertiesBuilder::new(),
             |mut pb, (k, v)| {
                 if k != "" {
+                    println!("{} = {:?}", k, &v);
                     pb.insert(k, v);
                 }
                 pb
@@ -355,6 +358,7 @@ fn properties<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Prope
 }
 
 fn object<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Properties<'a>, E> {
+    // TODO: move cut(lbrace) to a scope() parser
     preceded(lbrace, terminated(properties, cut(rbrace)))(input)
 }
 
@@ -437,7 +441,7 @@ mod tests {
     fn test_properties() {
         let list = r#"# comment
 key1 = val1
-key2 = val2
+key2=e
 key3 = val3
 "#;
 
@@ -448,7 +452,7 @@ key3 = val3
                 Properties {
                     map: [
                         ("key1", Value::Text("val1")),
-                        ("key2", Value::Text("val2")),
+                        ("key2", Value::Text("e")), // ensure this doesn't get interpreted as float
                         ("key3", Value::Text("val3")),
                     ]
                     .iter()
