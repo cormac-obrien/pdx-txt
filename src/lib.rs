@@ -35,18 +35,24 @@ use std::{
 };
 
 #[derive(Debug, PartialEq)]
-pub struct Error(String);
+pub enum Error {
+    Parse(String),
+    NoSuchProperty(String),
+}
 
 impl From<(&str, nom::error::VerboseError<&str>)> for Error {
     fn from(from: (&str, nom::error::VerboseError<&str>)) -> Self {
         let (input, error) = from;
-        Error(nom::error::convert_error(input, error))
+        Error::Parse(nom::error::convert_error(input, error))
     }
 }
 
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "Parse error: {}", self.0)
+        match self {
+            Error::Parse(ref s) => write!(f, "Parse error: {}", s),
+            Error::NoSuchProperty(ref s) => write!(f, "No such property: {}", s),
+        }
     }
 }
 
@@ -69,6 +75,17 @@ impl<'a> From<&'a str> for Value<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Properties<'a> {
     map: HashMap<&'a str, Value<'a>>,
+}
+
+impl<'a> Properties<'a> {
+    pub fn get<S>(&self, key: S) -> Result<&Value<'a>, Error>
+    where
+        S: AsRef<str>,
+    {
+        self.map
+            .get(key.as_ref())
+            .ok_or(Error::NoSuchProperty(key.as_ref().to_string()))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -295,8 +312,8 @@ key3 = val3
             properties::<()>(list),
             Ok((
                 "",
-                Properties::Map(
-                    [
+                Properties {
+                    map: [
                         ("key1", Value::Text("val1")),
                         ("key2", Value::Text("val2")),
                         ("key3", Value::Text("val3")),
@@ -304,7 +321,7 @@ key3 = val3
                     .iter()
                     .cloned()
                     .collect()
-                )
+                }
             ))
         );
     }
@@ -320,11 +337,11 @@ root_key = {
     }
 }
 "#;
-        let obj = Properties::Map(
-            [(
+        let obj = Properties {
+            map: [(
                 "root_key",
-                Value::Object(Properties::Map(
-                    [
+                Value::Object(Properties {
+                    map: [
                         ("prop1_key", Value::Text("val1")),
                         (
                             "prop2_key",
@@ -332,24 +349,62 @@ root_key = {
                         ),
                         (
                             "prop3_key",
-                            Value::Object(Properties::Map(
-                                [("prop3_1_key", Value::Text("val3_1"))]
+                            Value::Object(Properties {
+                                map: [("prop3_1_key", Value::Text("val3_1"))]
                                     .iter()
                                     .cloned()
                                     .collect(),
-                            )),
+                            }),
                         ),
                     ]
                     .iter()
                     .cloned()
                     .collect(),
-                )),
+                }),
             )]
             .iter()
             .cloned()
             .collect(),
-        );
+        };
 
         assert_eq!(parse(txt), Ok(obj))
+    }
+
+    #[test]
+    fn test_properties_get() {
+        let mut pb = PropertiesBuilder::new();
+        pb.insert("key1", Value::Text("value1"));
+        pb.insert("key2", Value::Text("k2v1"));
+        pb.insert("key2", Value::Text("k2v2"));
+        pb.insert(
+            "key3",
+            Value::List(vec!["k3v1".into(), "k3v2".into(), "k3v3".into()]),
+        );
+        pb.insert(
+            "key4",
+            Value::Object(Properties {
+                map: [("k4_1", Value::Text("v4_1"))].iter().cloned().collect(),
+            }),
+        );
+        let p = pb.build();
+        assert_eq!(p.get("key1"), Ok(&Value::Text("value1")));
+        assert_eq!(
+            p.get("key2"),
+            Ok(&Value::FlatList(vec!["k2v1".into(), "k2v2".into()]))
+        );
+        assert_eq!(
+            p.get("key3"),
+            Ok(&Value::List(vec![
+                "k3v1".into(),
+                "k3v2".into(),
+                "k3v3".into()
+            ]))
+        );
+        assert_eq!(
+            p.get("key4"),
+            Ok(&Value::Object(Properties {
+                map: [("k4_1", Value::Text("v4_1"))].iter().cloned().collect(),
+            }))
+        );
     }
 }
