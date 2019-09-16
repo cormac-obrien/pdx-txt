@@ -68,6 +68,7 @@ impl Fail for Error {}
 pub enum Value<'a> {
     Int(i32),
     Float(f32),
+    Bool(bool),
     Text(&'a str),
     FlatList(Vec<Value<'a>>), // for multiple identical keys in a property list
     List(Vec<Value<'a>>),
@@ -79,6 +80,7 @@ impl<'a> Value<'a> {
         match self {
             Value::Int(i) => OwnedValue::Int(*i),
             Value::Float(f) => OwnedValue::Float(*f),
+            Value::Bool(b) => OwnedValue::Bool(*b),
             Value::Text(ref s) => OwnedValue::Text(s.to_string()),
             Value::FlatList(ref fl) => {
                 OwnedValue::FlatList(fl.iter().map(|v| v.to_owned_value()).collect())
@@ -105,6 +107,16 @@ impl<'a> Value<'a> {
                 value: x.to_owned_value(),
                 target: "f32".to_string(),
             }),
+        }
+    }
+
+    pub fn try_as_bool(&self) -> Result<bool, Error> {
+        match self {
+            Value::Bool(b) => Ok(*b),
+            x => Err(Error::Type {
+                value: x.to_owned_value(),
+                target: "bool".to_string(),
+            })
         }
     }
 
@@ -172,6 +184,13 @@ impl<'a> Properties<'a> {
             .ok_or(Error::NoSuchProperty(key.as_ref().to_string()))
     }
 
+    pub fn get_opt<S>(&self, key: S) -> Option<&Value<'a>>
+    where
+        S: AsRef<str>,
+    {
+        self.map.get(key.as_ref())
+    }
+
     fn to_owned_properties(&self) -> OwnedProperties {
         OwnedProperties {
             map: self
@@ -215,6 +234,7 @@ impl<'a> PropertiesBuilder<'a> {
 pub enum OwnedValue {
     Int(i32),
     Float(f32),
+    Bool(bool),
     Text(String),
     FlatList(Vec<OwnedValue>),
     List(Vec<OwnedValue>),
@@ -308,7 +328,11 @@ fn property_rvalue<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, 
     alt((
         map(integer, Value::Int),
         map(floating, Value::Float),
-        map(text, Value::Text),
+        map(text, |t| match t {
+            "yes" => Value::Bool(true),
+            "no" => Value::Bool(false),
+            x => Value::Text(x),
+        }),
         map(list, Value::List),
         map(object, Value::Object),
     ))(input)
@@ -347,7 +371,6 @@ fn properties<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Prope
             PropertiesBuilder::new(),
             |mut pb, (k, v)| {
                 if k != "" {
-                    println!("{} = {:?}", k, &v);
                     pb.insert(k, v);
                 }
                 pb
@@ -470,7 +493,7 @@ root_key = {
     prop1_key = val1
     prop2_key = { 0.000 2.722 1.870 }
     prop3_key = { # prop3 comment
-        prop3_1_key = val3_1
+        prop3_1_key = no
     }
 }
 "#;
@@ -487,7 +510,7 @@ root_key = {
                         (
                             "prop3_key",
                             Value::Object(Properties {
-                                map: [("prop3_1_key", Value::Text("val3_1"))]
+                                map: [("prop3_1_key", Value::Bool(false))]
                                     .iter()
                                     .cloned()
                                     .collect(),
