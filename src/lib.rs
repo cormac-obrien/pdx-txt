@@ -18,6 +18,7 @@
 // TODO...
 // ```
 use failure::Fail;
+use log::trace;
 use nom::{
     branch::alt,
     bytes::complete::{escaped, take, take_till, take_while1},
@@ -116,7 +117,7 @@ impl<'a> Value<'a> {
             x => Err(Error::Type {
                 value: x.to_owned_value(),
                 target: "bool".to_string(),
-            })
+            }),
         }
     }
 
@@ -326,6 +327,9 @@ fn list<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Vec<Value<'
 
 fn property_rvalue<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Value<'a>, E> {
     alt((
+        // list needs to be at top because we assume multiple values in a row are a list and not
+        // a series of independent values
+        map(list, Value::List),
         map(integer, Value::Int),
         map(floating, Value::Float),
         map(text, |t| match t {
@@ -333,7 +337,6 @@ fn property_rvalue<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, 
             "no" => Value::Bool(false),
             x => Value::Text(x),
         }),
-        map(list, Value::List),
         map(object, Value::Object),
     ))(input)
 }
@@ -341,16 +344,50 @@ fn property_rvalue<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, 
 // sometimes saves have empty braces with no associated key
 fn empty_property<'a, E: ParseError<&'a str>>(
     input: &'a str,
-) -> IResult<&str, (&str, Value<'a>), E> {
-    map(preceded(lbrace, rbrace), |_| ("", "".into()))(input)
+) -> IResult<&str, Option<(&str, Value<'a>)>, E> {
+    map(preceded(lbrace, rbrace), |_| None)(input)
 }
 
-fn property<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, (&str, Value<'a>), E> {
+// a property with an Object value but no equal sign.
+// only occurs with Objects (as far as I can tell...)
+fn object_property_no_equal<'a, E: ParseError<&'a str>>(
+    input: &'a str,
+) -> IResult<&str, (&str, Value<'a>), E> {
     separated_pair(
         text,
-        preceded(space0, opt(char('='))), // save files sometimes don't have the equal
-        preceded(space0, property_rvalue),
+        space0,
+        preceded(space0, map(object, Value::Object)),
     )(input)
+}
+
+fn property<'a, E: ParseError<&'a str>>(
+    input: &'a str,
+) -> IResult<&str, Option<(&str, Value<'a>)>, E> {
+    map(
+        alt((
+            object_property_no_equal,
+            separated_pair(
+                text,
+                preceded(space0, char('=')), // save files sometimes don't have the equal
+                preceded(space0, property_rvalue),
+            ),
+        )),
+        |p| Some(p),
+    )(input)
+}
+
+// unnamed property may occur on top level of object e.g.
+// obj = {
+//     prop1 = "val1"
+//     123 456 789 # <<< here
+// }
+//
+// the end result is an Object with a property like:
+// "" => FlatList(123, 456, 789)
+fn flat_property<'a, E: ParseError<&'a str>>(
+    input: &'a str,
+) -> IResult<&str, Option<(&str, Value<'a>)>, E> {
+    map(property_rvalue, |prv| Some(("", prv)))(input)
 }
 
 fn properties<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Properties<'a>, E> {
@@ -359,7 +396,7 @@ fn properties<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Prope
             preceded(
                 space_line_comment,
                 terminated(
-                    alt((property, empty_property)),
+                    alt((property, empty_property, flat_property)),
                     // properties separated by spaces instead of lines occur in saves
                     alt((
                         trailing_line_ending,
@@ -369,8 +406,8 @@ fn properties<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Prope
                 ),
             ),
             PropertiesBuilder::new(),
-            |mut pb, (k, v)| {
-                if k != "" {
+            |mut pb, opt_kv| {
+                if let Some((k, v)) = opt_kv {
                     pb.insert(k, v);
                 }
                 pb
@@ -495,6 +532,12 @@ root_key = {
     prop3_key = { # prop3 comment
         prop3_1_key = no
     }
+    prop4_key = { # prop4 comment
+        prop4_1_key = yes
+        prop4_2_key = { 123 456 789 }
+
+        987 654 321
+    }
 }
 "#;
         let obj = Properties {
@@ -514,6 +557,25 @@ root_key = {
                                     .iter()
                                     .cloned()
                                     .collect(),
+                            }),
+                        ),
+                        (
+                            "prop4_key",
+                            Value::Object(Properties {
+                                map: [
+                                    ("prop4_1_key", Value::Bool(true)),
+                                    (
+                                        "prop4_2_key",
+                                        Value::List(vec![123.into(), 456.into(), 789.into()]),
+                                    ),
+                                    (
+                                        "",
+                                        Value::FlatList(vec![987.into(), 654.into(), 321.into()]),
+                                    ),
+                                ]
+                                .iter()
+                                .cloned()
+                                .collect(),
                             }),
                         ),
                     ]

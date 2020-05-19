@@ -9,6 +9,8 @@ edition = "2018"
 [dependencies]
 "failure" = "0.1"
 "nom" = "5.0"
+log = "0.4.8"
+env_logger = "0.7.1"
 
 [dev-dependencies]
 "encoding" = "0.2"
