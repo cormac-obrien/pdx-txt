@@ -8,7 +8,7 @@
 // ascii_alphanum = ascii_letter | ascii_digit ;
 //
 // space = " " | "\t" ;
-// line_ending = "\r\n" | "\n" ;
+// line_ending = "\r\n" | "\n" | "\r" ;
 // special = "{" | "}" | "=" ;
 //
 // line_comment = "#" { ? all characters ? - line_ending } line_ending ;
@@ -21,7 +21,7 @@ use failure::Fail;
 use log::trace;
 use nom::{
     branch::alt,
-    bytes::complete::{escaped, take, take_till, take_while1},
+    bytes::complete::{escaped, tag, take, take_till, take_while1},
     character::complete::{alphanumeric1, char, digit1, line_ending, one_of, space0, space1},
     combinator::{all_consuming, cut, map, map_res, not, opt, peek, recognize},
     error::{ParseError, VerboseError},
@@ -252,18 +252,23 @@ fn line_comment<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, &st
     preceded(char('#'), take_till(|c| c == '\r' || c == '\n'))(input)
 }
 
+// augment line_ending to handle bare carriage returns, which show up sometimes.
+fn cr_and_or_lf<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, &str, E> {
+    alt((line_ending, tag("\r")))(input)
+}
+
 // consume spaces, line endings and comments
 fn space_line_comment<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Vec<&str>, E> {
-    many0(alt((space1, line_ending, line_comment)))(input)
+    many0(alt((space1, cr_and_or_lf, line_comment)))(input)
 }
 
 // like line_ending, but also eats trailing spaces and comments
 fn trailing_line_ending<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, &str, E> {
-    preceded(many0(space1), preceded(opt(line_comment), line_ending))(input)
+    preceded(many0(space1), preceded(opt(line_comment), cr_and_or_lf))(input)
 }
 
 fn save_header<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, &str, E> {
-    terminated(alphanumeric1, line_ending)(input)
+    terminated(alphanumeric1, cr_and_or_lf)(input)
 }
 
 fn integer<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, i32, E> {
@@ -353,11 +358,7 @@ fn empty_property<'a, E: ParseError<&'a str>>(
 fn object_property_no_equal<'a, E: ParseError<&'a str>>(
     input: &'a str,
 ) -> IResult<&str, (&str, Value<'a>), E> {
-    separated_pair(
-        text,
-        space0,
-        preceded(space0, map(object, Value::Object)),
-    )(input)
+    separated_pair(text, space0, preceded(space0, map(object, Value::Object)))(input)
 }
 
 fn property<'a, E: ParseError<&'a str>>(
