@@ -401,6 +401,7 @@ fn properties<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, Prope
                     alt((
                         trailing_line_ending,
                         space1,
+                        map(peek(rbrace), |_| ""),
                         map(not(peek(take(1usize))), |_| ""), // EOF
                     )),
                 ),
