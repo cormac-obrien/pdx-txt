@@ -271,17 +271,30 @@ fn save_header<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, &str
     terminated(alphanumeric1, cr_and_or_lf)(input)
 }
 
+fn num_terminal<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, char, E> {
+    alt((
+        one_of("{}= \r\n\t"),
+        map(not(peek(take(1usize))), |_| ' '), // EOF
+    ))(input)
+}
+
 fn integer<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, i32, E> {
-    map_res(
-        recognize(terminated(pair(opt(char('-')), digit1), not(char('.')))),
-        FromStr::from_str,
+    map(
+        terminated(pair(opt(char('-')), digit1), peek(num_terminal)),
+        |(sign, num)| {
+            let n = num.parse::<i32>().unwrap();
+            match sign {
+                Some(_) => -n,
+                None => n,
+            }
+        },
     )(input)
 }
 
 fn floating<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, f32, E> {
     // check first char is a digit
     // this avoids weird parse issues with words that start with the letter e
-    preceded(peek(digit1), terminated(float, peek(not(char('.')))))(input)
+    preceded(peek(digit1), terminated(float, peek(num_terminal)))(input)
 }
 
 fn is_text_special(c: char) -> bool {
@@ -337,10 +350,16 @@ fn property_rvalue<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&str, 
         map(list, Value::List),
         map(integer, Value::Int),
         map(floating, Value::Float),
-        map(text, |t| match t {
-            "yes" => Value::Bool(true),
-            "no" => Value::Bool(false),
-            x => Value::Text(x),
+        map(text, |t| {
+            if t.len() > 0 && t.chars().next().unwrap().is_digit(10) {
+                println!("{}", t);
+            }
+
+            match t {
+                "yes" => Value::Bool(true),
+                "no" => Value::Bool(false),
+                x => Value::Text(x),
+            }
         }),
         map(object, Value::Object),
     ))(input)
@@ -449,7 +468,12 @@ mod tests {
     fn test_integer() {
         assert_eq!(integer::<()>("123"), Ok(("", 123)));
         assert_eq!(integer::<()>("-456"), Ok(("", -456)));
+        assert_eq!(integer::<()>("28392\n"), Ok(("\n", 28392)));
         assert_eq!(opt(integer::<()>)("175.012"), Ok(("175.012", None)));
+        assert_eq!(
+            opt(integer::<()>)("10_something"),
+            Ok(("10_something", None))
+        );
     }
 
     #[test]
@@ -540,6 +564,9 @@ root_key = {
 
         987 654 321
     }
+    prop5_key = {
+        prop5_1_key = 123_starts_with_number
+    }
 }
 "#;
         let obj = Properties {
@@ -579,6 +606,17 @@ root_key = {
                                 .cloned()
                                 .collect(),
                             }),
+                        ),
+                        (
+                            "prop5_key",
+                            Value::Object(Properties {
+                                map: [
+                                    ("prop5_1_key", Value::Text("123_starts_with_number")),
+                                ]
+                                    .iter()
+                                    .cloned()
+                                    .collect(),
+                            })
                         ),
                     ]
                     .iter()
